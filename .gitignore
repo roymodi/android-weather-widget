@@ -1,0 +1,20 @@
+# Built application files
+*.apk
+*.apks
+*.aab
+
+# Gradle files
+.gradle/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local configuration file (contains local SDK paths)
+local.properties
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+.DS_Store

@@ -1,0 +1,5 @@
+usable appp
+  & "$ep\gradle-$gv\bin\gradle.bat" assembleDebug
+
+  bild app 
+  $root = (Get-Location).Path; $gv = "8.5"; $ep = "$root\gradle-bin"; & "$ep\gradle-$gv\bin\gradle.bat" assembleDebug

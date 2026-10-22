@@ -36,6 +36,9 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
     public void onReceive(Context context, Intent intent) {
         super.onReceive(context, intent);
         if (intent != null && AppWidgetManager.ACTION_APPWIDGET_UPDATE.equals(intent.getAction())) {
+            // Keep background process alive long enough for GPS & Internet tasks to complete
+            final PendingResult pendingResult = goAsync();
+            
             AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(context);
             int[] appWidgetIds = intent.getIntArrayExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS);
             
@@ -49,6 +52,8 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
                     updateWidget(context, appWidgetManager, appWidgetId);
                 }
             }
+            
+            pendingResult.finish();
         }
     }
 
@@ -62,7 +67,6 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
     public static void updateWidget(Context context, AppWidgetManager appWidgetManager, int appWidgetId) {
         RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget_layout);
 
-        // Set up click intent for tap-to-refresh
         Intent intent = new Intent(context, WeatherWidgetProvider.class);
         intent.setAction(AppWidgetManager.ACTION_APPWIDGET_UPDATE);
         intent.putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, new int[]{appWidgetId});
@@ -72,12 +76,10 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
         );
         views.setOnClickPendingIntent(R.id.widget_root, pendingIntent);
         
-        // Show loading state on tap
         views.setTextViewText(R.id.tv_city, "Updating GPS...");
         views.setTextViewText(R.id.tv_temp, "...°C");
         appWidgetManager.updateAppWidget(appWidgetId, views);
 
-        // Fetch fresh GPS location
         fetchFreshGpsLocation(context, appWidgetManager, appWidgetId);
     }
 
@@ -98,11 +100,13 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
 
             String provider = gpsEnabled ? LocationManager.GPS_PROVIDER : LocationManager.NETWORK_PROVIDER;
 
-            // Request a fresh GPS location update with a timeout handler
             LocationListener listener = new LocationListener() {
                 @Override
                 public void onLocationChanged(Location location) {
-                    locationManager.removeUpdates(this);
+                    try {
+                        locationManager.removeUpdates(this);
+                    } catch (Exception ignored) {}
+                    
                     if (location != null) {
                         new FetchWeatherByCoordsTask(context, appWidgetManager, appWidgetId, location.getLatitude(), location.getLongitude()).execute();
                     } else {
@@ -115,10 +119,8 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
                 @Override public void onProviderDisabled(String provider) {}
             };
 
-            // Request single fresh update
             locationManager.requestLocationUpdates(provider, 0, 0, listener, Looper.getMainLooper());
 
-            // Safety timeout: if GPS doesn't lock within 7 seconds, fallback to last known location
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
                 try {
                     locationManager.removeUpdates(listener);

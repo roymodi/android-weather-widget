@@ -1,20 +1,12 @@
-# Built application files
-*.apk
-*.apks
-*.aab
-
-# Gradle files
+@"
 .gradle/
 build/
-captures/
-.externalNativeBuild/
-.cxx/
-
-# Local configuration file (contains local SDK paths)
+.DS_Store
 local.properties
-
-# IDE files
 .idea/
 .vscode/
 *.iml
-.DS_Store
+*.apk
+*.apks
+*.aab
+"@ | Set-Content -Path ".gitignore"

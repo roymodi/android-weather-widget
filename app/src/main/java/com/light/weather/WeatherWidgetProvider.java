@@ -65,22 +65,44 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
     }
 
     public static void updateWidget(Context context, AppWidgetManager appWidgetManager, int appWidgetId) {
+        // Restore the last successful weather before starting a refresh.
+        RemoteViews views = createWidgetViews(context, appWidgetId);
+        SharedPreferences prefs = context.getSharedPreferences("WeatherWidgetPrefs", Context.MODE_PRIVATE);
+
+        String savedCity = prefs.getString("weather_city_" + appWidgetId, null);
+        String savedTemp = prefs.getString("weather_temp_" + appWidgetId, null);
+        String savedIcon = prefs.getString("weather_icon_" + appWidgetId, null);
+
+        if (savedCity != null && savedTemp != null && savedIcon != null) {
+            views.setTextViewText(R.id.tv_city, savedCity);
+            views.setTextViewText(R.id.tv_temp, savedTemp);
+            views.setTextViewText(R.id.tv_weather_icon, savedIcon);
+        } else {
+            views.setTextViewText(R.id.tv_city, "Getting weather...");
+            views.setTextViewText(R.id.tv_temp, "--°C");
+            views.setTextViewText(R.id.tv_weather_icon, "🌤️");
+        }
+
+        // This full update initializes the widget and keeps the retry click action.
+        appWidgetManager.updateAppWidget(appWidgetId, views);
+        fetchFreshGpsLocation(context, appWidgetManager, appWidgetId);
+    }
+
+    private static RemoteViews createWidgetViews(Context context, int appWidgetId) {
         RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget_layout);
 
         Intent intent = new Intent(context, WeatherWidgetProvider.class);
         intent.setAction(AppWidgetManager.ACTION_APPWIDGET_UPDATE);
         intent.putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, new int[]{appWidgetId});
-        
+
         PendingIntent pendingIntent = PendingIntent.getBroadcast(
-            context, appWidgetId, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                context,
+                appWidgetId,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
         views.setOnClickPendingIntent(R.id.widget_root, pendingIntent);
-        
-        views.setTextViewText(R.id.tv_city, "Updating GPS...");
-        views.setTextViewText(R.id.tv_temp, "...°C");
-        appWidgetManager.updateAppWidget(appWidgetId, views);
-
-        fetchFreshGpsLocation(context, appWidgetManager, appWidgetId);
+        return views;
     }
 
     private static void fetchFreshGpsLocation(Context context, AppWidgetManager appWidgetManager, int appWidgetId) {
@@ -144,12 +166,8 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
 
         if (!manualCity.isEmpty()) {
             new FetchWeatherByCityTask(context, appWidgetManager, appWidgetId, manualCity).execute();
-        } else {
-            RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget_layout);
-            views.setTextViewText(R.id.tv_city, "GPS Failed");
-            views.setTextViewText(R.id.tv_temp, "Tap to Retry");
-            appWidgetManager.updateAppWidget(appWidgetId, views);
         }
+        // With no manual city, leave the current display unchanged. Tapping the widget retries.
     }
 
     private static class FetchWeatherByCityTask extends AsyncTask<Void, Void, String> {
@@ -259,35 +277,52 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
     }
 
     private static void updateUI(Context context, AppWidgetManager widgetManager, int widgetId, String payload) {
-        RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget_layout);
-        if (payload != null && payload.contains("|")) {
-            try {
-                String[] parts = payload.split("\\|", 2);
-                String locationName = parts[0];
-                JSONObject root = new JSONObject(parts[1]);
-                JSONObject current = root.getJSONObject("current_weather");
-                double temp = current.getDouble("temperature");
-                int weatherCode = current.getInt("weathercode");
-
-                views.setTextViewText(R.id.tv_city, locationName);
-                views.setTextViewText(R.id.tv_temp, temp + "°C");
-
-                String emoji = "☀️";
-                if (weatherCode >= 71 && weatherCode <= 77) {
-                    emoji = "❄️";
-                } else if (weatherCode >= 1 && weatherCode <= 3) {
-                    emoji = "☁️";
-                } else if (weatherCode >= 51) {
-                    emoji = "🌧️";
-                }
-                views.setTextViewText(R.id.tv_weather_icon, emoji);
-
-            } catch (Exception e) {
-                views.setTextViewText(R.id.tv_temp, "Parse Error");
-            }
-        } else {
-            views.setTextViewText(R.id.tv_temp, "Offline");
+        // A failed/empty response must not overwrite the last successful weather.
+        if (payload == null || !payload.contains("|")) {
+            return;
         }
-        widgetManager.updateAppWidget(widgetId, views);
+
+        try {
+            String[] parts = payload.split("\\|", 2);
+            if (parts.length != 2 || parts[0].trim().isEmpty()) {
+                return;
+            }
+
+            String locationName = parts[0].trim();
+            JSONObject root = new JSONObject(parts[1]);
+            JSONObject current = root.getJSONObject("current_weather");
+
+            double temp = current.getDouble("temperature");
+            int weatherCode = current.getInt("weathercode");
+
+            String emoji = "☀️";
+            if (weatherCode >= 71 && weatherCode <= 77) {
+                emoji = "❄️";
+            } else if (weatherCode >= 1 && weatherCode <= 3) {
+                emoji = "☁️";
+            } else if (weatherCode >= 51) {
+                emoji = "🌧️";
+            }
+
+            String temperature = String.format(Locale.getDefault(), "%.1f°C", temp);
+
+            // Cache only valid weather, so it can be restored during later updates.
+            SharedPreferences prefs = context.getSharedPreferences("WeatherWidgetPrefs", Context.MODE_PRIVATE);
+            prefs.edit()
+                    .putString("weather_city_" + widgetId, locationName)
+                    .putString("weather_temp_" + widgetId, temperature)
+                    .putString("weather_icon_" + widgetId, emoji)
+                    .apply();
+
+            RemoteViews views = createWidgetViews(context, widgetId);
+            views.setTextViewText(R.id.tv_city, locationName);
+            views.setTextViewText(R.id.tv_temp, temperature);
+            views.setTextViewText(R.id.tv_weather_icon, emoji);
+
+            // Update only after valid weather has been received and parsed.
+            widgetManager.updateAppWidget(widgetId, views);
+        } catch (Exception ignored) {
+            // Invalid server data: preserve the last successful display.
+        }
     }
 }

@@ -157,9 +157,11 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
                 }
             };
 
-            // Use the same token so the timeout is cancelled when a fresh location arrives.
-            handler.postAtTime(timeout, listener, android.os.SystemClock.uptimeMillis() + LOCATION_TIMEOUT_MS);
             locationManager.requestLocationUpdates(provider, 0L, 0f, listener, Looper.getMainLooper());
+            // Schedule only after location updates were registered successfully.
+            // The same token lets a fresh location cancel the timeout.
+            handler.postAtTime(timeout, listener,
+                    android.os.SystemClock.uptimeMillis() + LOCATION_TIMEOUT_MS);
 
         } catch (SecurityException e) {
             Log.w(TAG, "Location permission unavailable; trying configured city", e);

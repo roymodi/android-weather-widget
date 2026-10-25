@@ -66,6 +66,15 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
         }
 
         appWidgetManager.updateAppWidget(appWidgetId, views);
+
+        // A city entered in the widget configuration is an explicit choice;
+        // use it instead of silently replacing it with the device GPS location.
+        String manualCity = prefs.getString("manual_city_" + appWidgetId, "").trim();
+        if (!manualCity.isEmpty()) {
+            new FetchWeatherByCityTask(appContext, appWidgetManager, appWidgetId, manualCity).execute();
+            return;
+        }
+
         fetchFreshGpsLocation(appContext, appWidgetManager, appWidgetId);
     }
 

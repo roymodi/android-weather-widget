@@ -3,7 +3,6 @@ package com.light.weather;
 import android.app.PendingIntent;
 import android.appwidget.AppWidgetManager;
 import android.appwidget.AppWidgetProvider;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -16,46 +15,29 @@ import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.widget.RemoteViews;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
 
 public class WeatherWidgetProvider extends AppWidgetProvider {
-
-    @Override
-    public void onReceive(Context context, Intent intent) {
-        super.onReceive(context, intent);
-        if (intent != null && AppWidgetManager.ACTION_APPWIDGET_UPDATE.equals(intent.getAction())) {
-            // Keep background process alive long enough for GPS & Internet tasks to complete
-            final PendingResult pendingResult = goAsync();
-            
-            AppWidgetManager appWidgetManager = AppWidgetManager.getInstance(context);
-            int[] appWidgetIds = intent.getIntArrayExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS);
-            
-            if (appWidgetIds == null || appWidgetIds.length == 0) {
-                ComponentName provider = new ComponentName(context, WeatherWidgetProvider.class);
-                appWidgetIds = appWidgetManager.getAppWidgetIds(provider);
-            }
-
-            if (appWidgetIds != null && appWidgetIds.length > 0) {
-                for (int appWidgetId : appWidgetIds) {
-                    updateWidget(context, appWidgetManager, appWidgetId);
-                }
-            }
-            
-            pendingResult.finish();
-        }
-    }
+    private static final String TAG = "WeatherWidget";
+    private static final String PREFS_NAME = "WeatherWidgetPrefs";
+    private static final int CONNECT_TIMEOUT_MS = 10_000;
+    private static final int READ_TIMEOUT_MS = 15_000;
+    private static final long LOCATION_TIMEOUT_MS = 7_000L;
 
     @Override
     public void onUpdate(Context context, AppWidgetManager appWidgetManager, int[] appWidgetIds) {
@@ -65,9 +47,9 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
     }
 
     public static void updateWidget(Context context, AppWidgetManager appWidgetManager, int appWidgetId) {
-        // Restore the last successful weather before starting a refresh.
-        RemoteViews views = createWidgetViews(context, appWidgetId);
-        SharedPreferences prefs = context.getSharedPreferences("WeatherWidgetPrefs", Context.MODE_PRIVATE);
+        Context appContext = context.getApplicationContext();
+        RemoteViews views = createWidgetViews(appContext, appWidgetId);
+        SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
 
         String savedCity = prefs.getString("weather_city_" + appWidgetId, null);
         String savedTemp = prefs.getString("weather_temp_" + appWidgetId, null);
@@ -83,15 +65,15 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
             views.setTextViewText(R.id.tv_weather_icon, "🌤️");
         }
 
-        // This full update initializes the widget and keeps the retry click action.
         appWidgetManager.updateAppWidget(appWidgetId, views);
-        fetchFreshGpsLocation(context, appWidgetManager, appWidgetId);
+        fetchFreshGpsLocation(appContext, appWidgetManager, appWidgetId);
     }
 
     private static RemoteViews createWidgetViews(Context context, int appWidgetId) {
         RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget_layout);
 
         Intent intent = new Intent(context, WeatherWidgetProvider.class);
+        // Let AppWidgetProvider dispatch this through onUpdate exactly once.
         intent.setAction(AppWidgetManager.ACTION_APPWIDGET_UPDATE);
         intent.putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, new int[]{appWidgetId});
 
@@ -106,33 +88,45 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
     }
 
     private static void fetchFreshGpsLocation(Context context, AppWidgetManager appWidgetManager, int appWidgetId) {
-        LocationManager locationManager = (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
+        LocationManager locationManager =
+                (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
         if (locationManager == null) {
-            fallbackToManualOrError(context, appWidgetManager, appWidgetId);
+            fallbackToManualCity(context, appWidgetManager, appWidgetId);
             return;
         }
 
         try {
             boolean gpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
-            boolean netEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
-            if (!gpsEnabled && !netEnabled) {
-                fallbackToManualOrError(context, appWidgetManager, appWidgetId);
+            boolean networkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+            if (!gpsEnabled && !networkEnabled) {
+                fallbackToManualCity(context, appWidgetManager, appWidgetId);
                 return;
             }
 
-            String provider = gpsEnabled ? LocationManager.GPS_PROVIDER : LocationManager.NETWORK_PROVIDER;
+            final String provider = gpsEnabled
+                    ? LocationManager.GPS_PROVIDER
+                    : LocationManager.NETWORK_PROVIDER;
+            final Handler handler = new Handler(Looper.getMainLooper());
+            final boolean[] handled = {false};
 
-            LocationListener listener = new LocationListener() {
+            final LocationListener listener = new LocationListener() {
                 @Override
                 public void onLocationChanged(Location location) {
+                    if (handled[0]) return;
+                    handled[0] = true;
+                    handler.removeCallbacksAndMessages(this);
                     try {
                         locationManager.removeUpdates(this);
-                    } catch (Exception ignored) {}
-                    
+                    } catch (SecurityException ignored) {
+                        // The result can still be used if permission was revoked meanwhile.
+                    }
+
                     if (location != null) {
-                        new FetchWeatherByCoordsTask(context, appWidgetManager, appWidgetId, location.getLatitude(), location.getLongitude()).execute();
+                        new FetchWeatherByCoordsTask(
+                                context, appWidgetManager, appWidgetId,
+                                location.getLatitude(), location.getLongitude()).execute();
                     } else {
-                        fallbackToManualOrError(context, appWidgetManager, appWidgetId);
+                        fallbackToManualCity(context, appWidgetManager, appWidgetId);
                     }
                 }
 
@@ -141,33 +135,48 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
                 @Override public void onProviderDisabled(String provider) {}
             };
 
-            locationManager.requestLocationUpdates(provider, 0, 0, listener, Looper.getMainLooper());
-
-            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                try {
-                    locationManager.removeUpdates(listener);
-                    Location fallbackLoc = locationManager.getLastKnownLocation(provider);
-                    if (fallbackLoc != null) {
-                        new FetchWeatherByCoordsTask(context, appWidgetManager, appWidgetId, fallbackLoc.getLatitude(), fallbackLoc.getLongitude()).execute();
-                    } else {
-                        fallbackToManualOrError(context, appWidgetManager, appWidgetId);
+            Runnable timeout = new Runnable() {
+                @Override
+                public void run() {
+                    if (handled[0]) return;
+                    handled[0] = true;
+                    try {
+                        locationManager.removeUpdates(listener);
+                        Location lastKnown = locationManager.getLastKnownLocation(provider);
+                        if (lastKnown != null) {
+                            new FetchWeatherByCoordsTask(
+                                    context, appWidgetManager, appWidgetId,
+                                    lastKnown.getLatitude(), lastKnown.getLongitude()).execute();
+                        } else {
+                            fallbackToManualCity(context, appWidgetManager, appWidgetId);
+                        }
+                    } catch (SecurityException | IllegalArgumentException e) {
+                        Log.w(TAG, "Unable to obtain last-known location", e);
+                        fallbackToManualCity(context, appWidgetManager, appWidgetId);
                     }
-                } catch (Exception ignored) {}
-            }, 7000);
+                }
+            };
+
+            // Use the same token so the timeout is cancelled when a fresh location arrives.
+            handler.postAtTime(timeout, listener, android.os.SystemClock.uptimeMillis() + LOCATION_TIMEOUT_MS);
+            locationManager.requestLocationUpdates(provider, 0L, 0f, listener, Looper.getMainLooper());
 
         } catch (SecurityException e) {
-            fallbackToManualOrError(context, appWidgetManager, appWidgetId);
+            Log.w(TAG, "Location permission unavailable; trying configured city", e);
+            fallbackToManualCity(context, appWidgetManager, appWidgetId);
+        } catch (IllegalArgumentException e) {
+            Log.w(TAG, "Location provider unavailable; trying configured city", e);
+            fallbackToManualCity(context, appWidgetManager, appWidgetId);
         }
     }
 
-    private static void fallbackToManualOrError(Context context, AppWidgetManager appWidgetManager, int appWidgetId) {
-        SharedPreferences prefs = context.getSharedPreferences("WeatherWidgetPrefs", Context.MODE_PRIVATE);
+    private static void fallbackToManualCity(Context context, AppWidgetManager appWidgetManager, int appWidgetId) {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         String manualCity = prefs.getString("manual_city_" + appWidgetId, "").trim();
-
         if (!manualCity.isEmpty()) {
             new FetchWeatherByCityTask(context, appWidgetManager, appWidgetId, manualCity).execute();
         }
-        // With no manual city, leave the current display unchanged. Tapping the widget retries.
+        // Keep the last successful display when neither location nor manual city is available.
     }
 
     private static class FetchWeatherByCityTask extends AsyncTask<Void, Void, String> {
@@ -176,41 +185,35 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
         private final int widgetId;
         private final String cityName;
 
-        FetchWeatherByCityTask(Context c, AppWidgetManager m, int id, String city) {
-            this.context = c;
-            this.widgetManager = m;
+        FetchWeatherByCityTask(Context context, AppWidgetManager manager, int id, String city) {
+            this.context = context.getApplicationContext();
+            this.widgetManager = manager;
             this.widgetId = id;
             this.cityName = city;
         }
 
         @Override
-        protected String doInBackground(Void... voids) {
+        protected String doInBackground(Void... ignored) {
             try {
                 String encodedCity = URLEncoder.encode(cityName, "UTF-8");
-                String geoUrl = "https://geocoding-api.open-meteo.com/v1/search?name=" + encodedCity + "&count=1";
-                
-                URL url = new URI(geoUrl).toURL();
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-                StringBuilder sb = new StringBuilder();
-                String line;
-                while ((line = reader.readLine()) != null) sb.append(line);
-                reader.close();
+                String geoUrl = "https://geocoding-api.open-meteo.com/v1/search?name="
+                        + encodedCity + "&count=1";
+                String geoJson = readHttpResponse(geoUrl);
+                if (geoJson == null) return null;
 
-                JSONObject root = new JSONObject(sb.toString());
-                if (root.has("results")) {
-                    JSONArray results = root.getJSONArray("results");
-                    if (results.length() > 0) {
-                        JSONObject loc = results.getJSONObject(0);
-                        double lat = loc.getDouble("latitude");
-                        double lon = loc.getDouble("longitude");
-                        String resolvedName = loc.getString("name");
+                JSONObject root = new JSONObject(geoJson);
+                JSONArray results = root.optJSONArray("results");
+                if (results == null || results.length() == 0) return null;
 
-                        return fetchWeatherJson(lat, lon, resolvedName);
-                    }
-                }
-            } catch (Exception ignored) {}
-            return null;
+                JSONObject location = results.getJSONObject(0);
+                double latitude = location.getDouble("latitude");
+                double longitude = location.getDouble("longitude");
+                String resolvedName = location.optString("name", cityName);
+                return fetchWeatherJson(latitude, longitude, resolvedName);
+            } catch (Exception e) {
+                Log.w(TAG, "City weather lookup failed", e);
+                return null;
+            }
         }
 
         @Override
@@ -223,22 +226,24 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
         private final Context context;
         private final AppWidgetManager widgetManager;
         private final int widgetId;
-        private final double lat, lon;
+        private final double latitude;
+        private final double longitude;
 
-        FetchWeatherByCoordsTask(Context c, AppWidgetManager m, int id, double lat, double lon) {
-            this.context = c;
-            this.widgetManager = m;
+        FetchWeatherByCoordsTask(Context context, AppWidgetManager manager, int id,
+                                  double latitude, double longitude) {
+            this.context = context.getApplicationContext();
+            this.widgetManager = manager;
             this.widgetId = id;
-            this.lat = lat;
-            this.lon = lon;
+            this.latitude = latitude;
+            this.longitude = longitude;
         }
 
         @Override
-        protected String doInBackground(Void... voids) {
+        protected String doInBackground(Void... ignored) {
             String locationName = "My Location";
             try {
                 Geocoder geocoder = new Geocoder(context, Locale.getDefault());
-                List<Address> addresses = geocoder.getFromLocation(lat, lon, 1);
+                List<Address> addresses = geocoder.getFromLocation(latitude, longitude, 1);
                 if (addresses != null && !addresses.isEmpty()) {
                     Address address = addresses.get(0);
                     if (address.getLocality() != null) {
@@ -249,9 +254,11 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
                         locationName = address.getAdminArea();
                     }
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                Log.d(TAG, "Reverse geocoding unavailable; using generic location label", e);
+            }
 
-            return fetchWeatherJson(lat, lon, locationName);
+            return fetchWeatherJson(latitude, longitude, locationName);
         }
 
         @Override
@@ -260,54 +267,86 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
         }
     }
 
-    private static String fetchWeatherJson(double lat, double lon, String label) {
+    private static String fetchWeatherJson(double latitude, double longitude, String label) {
+        String apiUrl = "https://api.open-meteo.com/v1/forecast?latitude="
+                + latitude + "&longitude=" + longitude + "&current_weather=true";
+        String response = readHttpResponse(apiUrl);
+        return response == null ? null : label + "|" + response;
+    }
+
+    private static String readHttpResponse(String address) {
+        HttpURLConnection connection = null;
         try {
-            String apiUrl = "https://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon + "&current_weather=true";
-            URL url = new URI(apiUrl).toURL();
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-            StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) sb.append(line);
-            reader.close();
-            return label + "|" + sb.toString();
+            URL url = new URI(address).toURL();
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setUseCaches(false);
+            connection.setRequestProperty("Accept", "application/json");
+
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+                Log.w(TAG, "Weather API returned HTTP " + status);
+                return null;
+            }
+
+            try (InputStream stream = connection.getInputStream();
+                 BufferedReader reader = new BufferedReader(
+                         new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                StringBuilder body = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    body.append(line);
+                }
+                return body.toString();
+            }
         } catch (Exception e) {
+            Log.w(TAG, "HTTP request failed", e);
             return null;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
+    private static String weatherEmoji(int code) {
+        if (code == 0) return "☀️";
+        if (code >= 1 && code <= 3) return "☁️";
+        if (code == 45 || code == 48) return "🌫️";
+        if ((code >= 51 && code <= 57) || (code >= 61 && code <= 67)
+                || (code >= 80 && code <= 82)) return "🌧️";
+        if ((code >= 71 && code <= 77) || code == 85 || code == 86) return "❄️";
+        if (code == 95 || code == 96 || code == 99) return "⛈️";
+        return "🌤️";
+    }
+
     private static void updateUI(Context context, AppWidgetManager widgetManager, int widgetId, String payload) {
-        // A failed/empty response must not overwrite the last successful weather.
-        if (payload == null || !payload.contains("|")) {
-            return;
-        }
+        // A failed request never replaces the last successful weather with an "Offline" value.
+        if (payload == null) return;
+        int separator = payload.indexOf('|');
+        if (separator <= 0 || separator == payload.length() - 1) return;
 
         try {
-            String[] parts = payload.split("\\|", 2);
-            if (parts.length != 2 || parts[0].trim().isEmpty()) {
+            String locationName = payload.substring(0, separator).trim();
+            if (locationName.isEmpty()) return;
+
+            JSONObject root = new JSONObject(payload.substring(separator + 1));
+            JSONObject current = root.optJSONObject("current_weather");
+            if (current == null || !current.has("temperature") || !current.has("weathercode")) {
+                Log.w(TAG, "Weather response did not contain current weather fields");
                 return;
             }
 
-            String locationName = parts[0].trim();
-            JSONObject root = new JSONObject(parts[1]);
-            JSONObject current = root.getJSONObject("current_weather");
-
             double temp = current.getDouble("temperature");
             int weatherCode = current.getInt("weathercode");
-
-            String emoji = "☀️";
-            if (weatherCode >= 71 && weatherCode <= 77) {
-                emoji = "❄️";
-            } else if (weatherCode >= 1 && weatherCode <= 3) {
-                emoji = "☁️";
-            } else if (weatherCode >= 51) {
-                emoji = "🌧️";
-            }
+            if (Double.isNaN(temp) || Double.isInfinite(temp)) return;
 
             String temperature = String.format(Locale.getDefault(), "%.1f°C", temp);
+            String emoji = weatherEmoji(weatherCode);
 
-            // Cache only valid weather, so it can be restored during later updates.
-            SharedPreferences prefs = context.getSharedPreferences("WeatherWidgetPrefs", Context.MODE_PRIVATE);
+            SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
             prefs.edit()
                     .putString("weather_city_" + widgetId, locationName)
                     .putString("weather_temp_" + widgetId, temperature)
@@ -318,11 +357,9 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
             views.setTextViewText(R.id.tv_city, locationName);
             views.setTextViewText(R.id.tv_temp, temperature);
             views.setTextViewText(R.id.tv_weather_icon, emoji);
-
-            // Update only after valid weather has been received and parsed.
             widgetManager.updateAppWidget(widgetId, views);
-        } catch (Exception ignored) {
-            // Invalid server data: preserve the last successful display.
+        } catch (Exception e) {
+            Log.w(TAG, "Unable to parse weather response; preserving cached weather", e);
         }
     }
 }

@@ -108,44 +108,58 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
         }
 
         try {
-            boolean gpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
-            boolean networkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
-            if (!gpsEnabled && !networkEnabled) {
-                fallbackToManualCity(context, appWidgetManager, appWidgetId);
-                return;
-            }
-
-            final String provider = gpsEnabled
-                    ? LocationManager.GPS_PROVIDER
-                    : LocationManager.NETWORK_PROVIDER;
+            final String[] providers = {
+                    LocationManager.NETWORK_PROVIDER,
+                    LocationManager.GPS_PROVIDER
+            };
             final Handler handler = new Handler(Looper.getMainLooper());
             final boolean[] handled = {false};
 
             final LocationListener listener = new LocationListener() {
                 @Override
                 public void onLocationChanged(Location location) {
-                    if (handled[0]) return;
+                    if (handled[0] || location == null) return;
                     handled[0] = true;
                     handler.removeCallbacksAndMessages(this);
                     try {
                         locationManager.removeUpdates(this);
                     } catch (SecurityException ignored) {
-                        // The result can still be used if permission was revoked meanwhile.
+                        // Use the location already received.
                     }
-
-                    if (location != null) {
-                        new FetchWeatherByCoordsTask(
-                                context, appWidgetManager, appWidgetId,
-                                location.getLatitude(), location.getLongitude()).execute();
-                    } else {
-                        fallbackToManualCity(context, appWidgetManager, appWidgetId);
-                    }
+                    new FetchWeatherByCoordsTask(
+                            context, appWidgetManager, appWidgetId,
+                            location.getLatitude(), location.getLongitude()).execute();
                 }
 
                 @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
                 @Override public void onProviderEnabled(String provider) {}
                 @Override public void onProviderDisabled(String provider) {}
             };
+
+            boolean requestedUpdates = false;
+            for (String provider : providers) {
+                try {
+                    if (locationManager.isProviderEnabled(provider)) {
+                        locationManager.requestLocationUpdates(
+                                provider, 0L, 0f, listener, Looper.getMainLooper());
+                        requestedUpdates = true;
+                    }
+                } catch (IllegalArgumentException e) {
+                    Log.w(TAG, "Location provider unavailable: " + provider, e);
+                }
+            }
+
+            if (!requestedUpdates) {
+                Location lastKnown = getLastKnownLocation(locationManager, providers);
+                if (lastKnown != null) {
+                    new FetchWeatherByCoordsTask(
+                            context, appWidgetManager, appWidgetId,
+                            lastKnown.getLatitude(), lastKnown.getLongitude()).execute();
+                } else {
+                    fallbackToManualCity(context, appWidgetManager, appWidgetId);
+                }
+                return;
+            }
 
             Runnable timeout = new Runnable() {
                 @Override
@@ -154,24 +168,21 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
                     handled[0] = true;
                     try {
                         locationManager.removeUpdates(listener);
-                        Location lastKnown = locationManager.getLastKnownLocation(provider);
-                        if (lastKnown != null) {
-                            new FetchWeatherByCoordsTask(
-                                    context, appWidgetManager, appWidgetId,
-                                    lastKnown.getLatitude(), lastKnown.getLongitude()).execute();
-                        } else {
-                            fallbackToManualCity(context, appWidgetManager, appWidgetId);
-                        }
-                    } catch (SecurityException | IllegalArgumentException e) {
-                        Log.w(TAG, "Unable to obtain last-known location", e);
+                    } catch (SecurityException ignored) {
+                        // Continue with any cached location we can access.
+                    }
+
+                    Location lastKnown = getLastKnownLocation(locationManager, providers);
+                    if (lastKnown != null) {
+                        new FetchWeatherByCoordsTask(
+                                context, appWidgetManager, appWidgetId,
+                                lastKnown.getLatitude(), lastKnown.getLongitude()).execute();
+                    } else {
+                        Log.w(TAG, "No fresh or cached location available");
                         fallbackToManualCity(context, appWidgetManager, appWidgetId);
                     }
                 }
             };
-
-            locationManager.requestLocationUpdates(provider, 0L, 0f, listener, Looper.getMainLooper());
-            // Schedule only after location updates were registered successfully.
-            // The same token lets a fresh location cancel the timeout.
             handler.postAtTime(timeout, listener,
                     android.os.SystemClock.uptimeMillis() + LOCATION_TIMEOUT_MS);
 
@@ -179,9 +190,34 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
             Log.w(TAG, "Location permission unavailable; trying configured city", e);
             fallbackToManualCity(context, appWidgetManager, appWidgetId);
         } catch (IllegalArgumentException e) {
-            Log.w(TAG, "Location provider unavailable; trying configured city", e);
-            fallbackToManualCity(context, appWidgetManager, appWidgetId);
+            Log.w(TAG, "Unable to register location updates; trying cached location", e);
+            Location lastKnown = getLastKnownLocation(locationManager,
+                    new String[]{LocationManager.NETWORK_PROVIDER, LocationManager.GPS_PROVIDER});
+            if (lastKnown != null) {
+                new FetchWeatherByCoordsTask(
+                        context, appWidgetManager, appWidgetId,
+                        lastKnown.getLatitude(), lastKnown.getLongitude()).execute();
+            } else {
+                fallbackToManualCity(context, appWidgetManager, appWidgetId);
+            }
         }
+    }
+
+    private static Location getLastKnownLocation(LocationManager locationManager, String[] providers) {
+        Location best = null;
+        for (String provider : providers) {
+            try {
+                if (!locationManager.isProviderEnabled(provider)) continue;
+                Location candidate = locationManager.getLastKnownLocation(provider);
+                if (candidate != null && (best == null
+                        || candidate.getTime() > best.getTime())) {
+                    best = candidate;
+                }
+            } catch (SecurityException | IllegalArgumentException e) {
+                Log.d(TAG, "Cannot read last-known location from " + provider, e);
+            }
+        }
+        return best;
     }
 
     private static void fallbackToManualCity(Context context, AppWidgetManager appWidgetManager, int appWidgetId) {

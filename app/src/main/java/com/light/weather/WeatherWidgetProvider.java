@@ -4,6 +4,7 @@ import android.app.PendingIntent;
 import android.appwidget.AppWidgetManager;
 import android.appwidget.AppWidgetProvider;
 import android.content.Context;
+import android.graphics.Color;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.location.Address;
@@ -80,6 +81,8 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
 
     private static RemoteViews createWidgetViews(Context context, int appWidgetId) {
         RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget_layout);
+        // Explicitly keep the widget content surface transparent on launchers that honor RemoteViews backgrounds.
+        views.setInt(R.id.widget_root, "setBackgroundColor", Color.TRANSPARENT);
 
         Intent intent = new Intent(context, WeatherWidgetProvider.class);
         // Let AppWidgetProvider dispatch this through onUpdate exactly once.

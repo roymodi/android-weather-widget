@@ -11,6 +11,7 @@ import android.os.Build;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
+import androidx.core.content.ContextCompat;
 import androidx.core.location.LocationManagerCompat;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
@@ -91,14 +92,14 @@ public class WeatherRefreshWorker extends Worker {
     }
 
     private static boolean hasRequiredLocationPermissions(Context context) {
-        boolean foreground = context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+        boolean foreground = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
                 == PackageManager.PERMISSION_GRANTED
-                || context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                || ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION)
                 == PackageManager.PERMISSION_GRANTED;
         if (!foreground) return false;
 
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
-                || context.checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                || ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
                 == PackageManager.PERMISSION_GRANTED;
     }
 

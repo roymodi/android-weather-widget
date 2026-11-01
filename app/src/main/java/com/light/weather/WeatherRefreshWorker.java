@@ -13,6 +13,7 @@ import android.util.Log;
 import androidx.annotation.NonNull;
 import androidx.core.content.ContextCompat;
 import androidx.core.location.LocationManagerCompat;
+import androidx.core.os.CancellationSignal;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
 
@@ -125,7 +126,7 @@ public class WeatherRefreshWorker extends Worker {
                     }
 
                     LocationManagerCompat.getCurrentLocation(
-                            manager, provider, null, executor, location -> {
+                            manager, provider, (CancellationSignal) null, executor, location -> {
                                 if (location != null) {
                                     Location current = bestLocation.get();
                                     if (current == null

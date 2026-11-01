@@ -47,6 +47,36 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
     private static final int READ_TIMEOUT_MS = 15_000;
     private static final long LOCATION_TIMEOUT_MS = 7_000L;
 
+    private static final String ACTION_REFRESH_WIDGET =
+            "com.light.weather.ACTION_REFRESH_WIDGET";
+    private static final long TAP_DEBOUNCE_MS = 2_000L;
+
+    @Override
+    public void onReceive(Context context, Intent intent) {
+        if (intent != null && ACTION_REFRESH_WIDGET.equals(intent.getAction())) {
+            int widgetId = intent.getIntExtra(
+                    AppWidgetManager.EXTRA_APPWIDGET_ID,
+                    AppWidgetManager.INVALID_APPWIDGET_ID);
+            if (widgetId == AppWidgetManager.INVALID_APPWIDGET_ID) return;
+
+            // A normal tap refreshes immediately. A rapid second tap is treated
+            // as the same request so it does not start duplicate GPS/network work.
+            SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            String key = "last_widget_tap_" + widgetId;
+            long now = System.currentTimeMillis();
+            long previous = prefs.getLong(key, 0L);
+            if (previous > 0L && now >= previous && now - previous < TAP_DEBOUNCE_MS) {
+                return;
+            }
+            prefs.edit().putLong(key, now).apply();
+
+            updateWidget(context, AppWidgetManager.getInstance(context), widgetId);
+            return;
+        }
+        super.onReceive(context, intent);
+    }
+
+
     @Override
     public void onEnabled(Context context) {
         schedulePeriodicRefresh(context);
@@ -104,9 +134,9 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
         views.setInt(R.id.widget_root, "setBackgroundColor", Color.TRANSPARENT);
 
         Intent intent = new Intent(context, WeatherWidgetProvider.class);
-        // Let AppWidgetProvider dispatch this through onUpdate exactly once.
-        intent.setAction(AppWidgetManager.ACTION_APPWIDGET_UPDATE);
-        intent.putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, new int[]{appWidgetId});
+        // A tap on the widget requests a fresh location and weather lookup.
+        intent.setAction(ACTION_REFRESH_WIDGET);
+        intent.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId);
 
         PendingIntent pendingIntent = PendingIntent.getBroadcast(
                 context,

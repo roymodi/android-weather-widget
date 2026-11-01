@@ -323,6 +323,67 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
         return true;
     }
 
+    /**
+     * Refreshes weather using the latest location acquired by the periodic worker.
+     * City geocoding is repeated only after the device moves more than 1 km.
+     */
+    public static boolean refreshFromCurrentLocation(Context context,
+                                                     AppWidgetManager widgetManager,
+                                                     int widgetId,
+                                                     Location currentLocation) {
+        if (currentLocation == null) return false;
+
+        Context appContext = context.getApplicationContext();
+        SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String label = prefs.getString("location_label_" + widgetId, null);
+        String oldLat = prefs.getString("location_lat_" + widgetId, null);
+        String oldLon = prefs.getString("location_lon_" + widgetId, null);
+        boolean movedSignificantly = true;
+
+        try {
+            if (oldLat != null && oldLon != null) {
+                Location previous = new Location("saved");
+                previous.setLatitude(Double.parseDouble(oldLat));
+                previous.setLongitude(Double.parseDouble(oldLon));
+                movedSignificantly = previous.distanceTo(currentLocation) >= 1000f;
+            }
+        } catch (Exception ignored) {
+            movedSignificantly = true;
+        }
+
+        if (label == null || label.trim().isEmpty() || movedSignificantly) {
+            try {
+                Geocoder geocoder = new Geocoder(appContext, Locale.getDefault());
+                List<Address> addresses = geocoder.getFromLocation(
+                        currentLocation.getLatitude(), currentLocation.getLongitude(), 1);
+                if (addresses != null && !addresses.isEmpty()) {
+                    Address address = addresses.get(0);
+                    if (address.getLocality() != null) {
+                        label = address.getLocality();
+                    } else if (address.getSubAdminArea() != null) {
+                        label = address.getSubAdminArea();
+                    } else if (address.getAdminArea() != null) {
+                        label = address.getAdminArea();
+                    }
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Unable to resolve the new location name", e);
+            }
+        }
+
+        if (label == null || label.trim().isEmpty()) label = "My Location";
+
+        saveLocation(appContext, widgetId,
+                currentLocation.getLatitude(), currentLocation.getLongitude(), label);
+
+        String payload = fetchWeatherJson(
+                currentLocation.getLatitude(), currentLocation.getLongitude(), label);
+        if (payload == null) return false;
+
+        updateUI(appContext, widgetManager, widgetId, payload);
+        return true;
+    }
+
     private static class FetchWeatherByCityTask extends AsyncTask<Void, Void, String> {
         private final Context context;
         private final AppWidgetManager widgetManager;

@@ -19,6 +19,12 @@ import android.os.Looper;
 import android.util.Log;
 import android.widget.RemoteViews;
 
+import androidx.work.Constraints;
+import androidx.work.ExistingPeriodicWorkPolicy;
+import androidx.work.NetworkType;
+import androidx.work.PeriodicWorkRequest;
+import androidx.work.WorkManager;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -32,6 +38,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.TimeUnit;
 
 public class WeatherWidgetProvider extends AppWidgetProvider {
     private static final String TAG = "WeatherWidget";
@@ -41,13 +48,25 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
     private static final long LOCATION_TIMEOUT_MS = 7_000L;
 
     @Override
+    public void onEnabled(Context context) {
+        schedulePeriodicRefresh(context);
+    }
+
+    @Override
+    public void onDisabled(Context context) {
+        WorkManager.getInstance(context).cancelUniqueWork("weather_widget_periodic_refresh");
+    }
+
+    @Override
     public void onUpdate(Context context, AppWidgetManager appWidgetManager, int[] appWidgetIds) {
+        schedulePeriodicRefresh(context);
         for (int appWidgetId : appWidgetIds) {
             updateWidget(context, appWidgetManager, appWidgetId);
         }
     }
 
     public static void updateWidget(Context context, AppWidgetManager appWidgetManager, int appWidgetId) {
+        schedulePeriodicRefresh(context);
         Context appContext = context.getApplicationContext();
         RemoteViews views = createWidgetViews(appContext, appWidgetId);
         SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
@@ -144,8 +163,9 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
                                 provider, 0L, 0f, listener, Looper.getMainLooper());
                         requestedUpdates = true;
                     }
-                } catch (IllegalArgumentException e) {
-                    Log.w(TAG, "Location provider unavailable: " + provider, e);
+                } catch (SecurityException | IllegalArgumentException e) {
+                    // A coarse-only permission may allow NETWORK_PROVIDER but not GPS_PROVIDER.
+                    Log.w(TAG, "Location provider unavailable or not permitted: " + provider, e);
                 }
             }
 
@@ -229,6 +249,80 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
         // Keep the last successful display when neither location nor manual city is available.
     }
 
+    private static void schedulePeriodicRefresh(Context context) {
+        Constraints constraints = new Constraints.Builder()
+                .setRequiredNetworkType(NetworkType.CONNECTED)
+                .build();
+        PeriodicWorkRequest request = new PeriodicWorkRequest.Builder(
+                WeatherRefreshWorker.class, 30, TimeUnit.MINUTES)
+                .setConstraints(constraints)
+                .build();
+        WorkManager.getInstance(context.getApplicationContext())
+                .enqueueUniquePeriodicWork(
+                        "weather_widget_periodic_refresh",
+                        ExistingPeriodicWorkPolicy.KEEP,
+                        request);
+    }
+
+    private static void saveLocation(Context context, int widgetId,
+                                     double latitude, double longitude, String label) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putString("location_lat_" + widgetId, Double.toString(latitude))
+                .putString("location_lon_" + widgetId, Double.toString(longitude))
+                .putString("location_label_" + widgetId, label)
+                .apply();
+    }
+
+    /**
+     * Refreshes using coordinates saved while the user was actively configuring or
+     * tapping the widget. This avoids requesting background GPS permission.
+     */
+    public static boolean refreshFromSavedLocation(Context context,
+                                                   AppWidgetManager widgetManager,
+                                                   int widgetId) {
+        Context appContext = context.getApplicationContext();
+        SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String latText = prefs.getString("location_lat_" + widgetId, null);
+        String lonText = prefs.getString("location_lon_" + widgetId, null);
+        String label = prefs.getString("location_label_" + widgetId, "My Location");
+        String payload = null;
+
+        try {
+            if (latText != null && lonText != null) {
+                double latitude = Double.parseDouble(latText);
+                double longitude = Double.parseDouble(lonText);
+                payload = fetchWeatherJson(latitude, longitude, label);
+            } else {
+                String city = prefs.getString("manual_city_" + widgetId, "").trim();
+                if (city.isEmpty()) return true; // No saved location yet; do not retry forever.
+
+                String encodedCity = URLEncoder.encode(city, "UTF-8");
+                String geoJson = readHttpResponse(
+                        "https://geocoding-api.open-meteo.com/v1/search?name="
+                                + encodedCity + "&count=1");
+                if (geoJson != null) {
+                    JSONObject root = new JSONObject(geoJson);
+                    JSONArray results = root.optJSONArray("results");
+                    if (results != null && results.length() > 0) {
+                        JSONObject location = results.getJSONObject(0);
+                        double latitude = location.getDouble("latitude");
+                        double longitude = location.getDouble("longitude");
+                        label = location.optString("name", city);
+                        saveLocation(appContext, widgetId, latitude, longitude, label);
+                        payload = fetchWeatherJson(latitude, longitude, label);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Scheduled weather refresh failed", e);
+            return false;
+        }
+
+        if (payload == null) return false;
+        updateUI(appContext, widgetManager, widgetId, payload);
+        return true;
+    }
+
     private static class FetchWeatherByCityTask extends AsyncTask<Void, Void, String> {
         private final Context context;
         private final AppWidgetManager widgetManager;
@@ -259,6 +353,7 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
                 double latitude = location.getDouble("latitude");
                 double longitude = location.getDouble("longitude");
                 String resolvedName = location.optString("name", cityName);
+                saveLocation(context, widgetId, latitude, longitude, resolvedName);
                 return fetchWeatherJson(latitude, longitude, resolvedName);
             } catch (Exception e) {
                 Log.w(TAG, "City weather lookup failed", e);
@@ -308,6 +403,7 @@ public class WeatherWidgetProvider extends AppWidgetProvider {
                 Log.d(TAG, "Reverse geocoding unavailable; using generic location label", e);
             }
 
+            saveLocation(context, widgetId, latitude, longitude, locationName);
             return fetchWeatherJson(latitude, longitude, locationName);
         }
 
